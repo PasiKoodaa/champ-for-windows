@@ -97,6 +97,7 @@ def inference(
     height,
     device="cuda",
     dtype=torch.float16,
+    batch_size=15,  # Define the number of frames to process in each batch
 ):
     reference_unet = model.reference_unet
     denoising_unet = model.denoising_unet
@@ -114,21 +115,40 @@ def inference(
         scheduler=scheduler,
     )
     pipeline = pipeline.to(device, dtype)
-    
-    video = pipeline(
-        ref_image_pil,
-        guidance_pil_group,
-        width,
-        height,
-        video_length,
-        num_inference_steps=cfg.num_inference_steps,
-        guidance_scale=cfg.guidance_scale,
-        generator=generator
-    ).videos
-    
-    del pipeline
-    torch_gc()
-    
+
+    # Initialize an empty list to store batched video tensors
+    video_batches = []
+
+    for start_idx in range(0, video_length, batch_size):
+        end_idx = min(start_idx + batch_size, video_length)
+        guidance_pil_group_batch = {gt: g[start_idx:end_idx] for gt, g in guidance_pil_group.items()}
+        
+        video_batch = pipeline(
+            ref_image_pil,
+            guidance_pil_group_batch,
+            width,
+            height,
+            end_idx - start_idx,
+            num_inference_steps=cfg.num_inference_steps,
+            guidance_scale=cfg.guidance_scale,
+            generator=generator
+        ).videos
+
+        video_batches.append(video_batch)
+
+        # Memory management after processing each batch
+        del video_batch  # Delete temporary variables
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # Concatenate all batches to form the full video tensor
+    video = torch.cat(video_batches, dim=2)  # Assuming the batch dimension is 2 (channels, frames, height, width)
+
+    # Clear memory after processing all batches
+    del video_batches, pipeline
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return video
     
 def main(cfg):
